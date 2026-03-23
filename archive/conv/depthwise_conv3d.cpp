@@ -895,15 +895,18 @@ __device__ __forceinline__ auto dot2(float2 a, float2 b) {
 // }
 
 using bf16x2 = short __attribute__((vector_size(4)));
+using f16x2 = __fp16 __attribute__((vector_size(4)));
 __device__ __forceinline__ bf16x2 pack_bf16x2(__hip_bfloat16 a, __hip_bfloat16 b) {
   bf16x2 v;
   reinterpret_cast<__hip_bfloat16*>(&v)[0] = a;
   reinterpret_cast<__hip_bfloat16*>(&v)[1] = b;
   return v;
 }
-
-__device__ __forceinline__ float fdot2_bf16_acc(bf16x2 a, bf16x2 b, float acc) {
-  return __builtin_amdgcn_fdot2_f32_bf16(a, b, acc, false);
+__device__ __forceinline__ f16x2 pack_f16x2(__fp16 a, __fp16 b) {
+  f16x2 v;
+  reinterpret_cast<__fp16*>(&v)[0] = a;
+  reinterpret_cast<__fp16*>(&v)[1] = b;
+  return v;
 }
 
 // Generalized opt3 BFloat16: runtime oT, oH, oW; dynamic smem. Hot path uses compile-time (3,5,5) so loops unroll.
@@ -1020,8 +1023,8 @@ for (int out_linear = threadIdx.x; out_linear < num_outputs; out_linear += block
       }
     }
   }
-  #if defined(__HIP_DEVICE_COMPILE__) && defined(__clang__) && \
-    __has_builtin(__builtin_amdgcn_fdot2_f32_bf16)
+  #if defined(__HIP_DEVICE_COMPILE__) && defined(__clang__) && defined(__gfx950__) && \
+    __has_builtin(__builtin_amdgcn_fdot2_f32_bf16) 
     // if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
     if constexpr (std::is_same_v<__hip_bfloat16, __hip_bfloat16>) { // no ops on bf16
       // 2 × bf16 dot → f32 acc (AMDGCN dot2). Needs supported gfx + compile flags.
@@ -1032,10 +1035,10 @@ for (int out_linear = threadIdx.x; out_linear < num_outputs; out_linear += block
         bf16x2 xi = pack_bf16x2(input_reg[w + 0], input_reg[w + 1]);
         sum = __builtin_amdgcn_fdot2_f32_bf16(wa, xi, sum, false);
       }
-      if (WEIGHT_SIZE % 2 == 1) {
-        const int w = WEIGHT_SIZE - 1;
-        sum += static_cast<float>(weight_reg[w]) * static_cast<float>(input_reg[w]);
-      }
+    }
+    if (WEIGHT_SIZE &1) {
+      const int w = WEIGHT_SIZE - 1;
+      sum += static_cast<float>(weight_reg[w]) * static_cast<float>(input_reg[w]);
     }
   #else
     {
@@ -1050,6 +1053,153 @@ for (int out_linear = threadIdx.x; out_linear < num_outputs; out_linear += block
     // output[b][out_channel][out_frame][oh][ow] = static_cast<__hip_bfloat16>(sum);
     output[b * oC * output_stride_c + out_channel * output_stride_c
            + out_frame * output_stride_t + oh * oW + ow] = (__hip_bfloat16)sum;
+  }
+}
+
+// Generalized opt3 FP16: runtime oT, oH, oW; dynamic smem. Hot path uses compile-time (3,5,5) so loops unroll.
+__global__ void conv_depthwise3d_cuda_kernel_opt3_fp16_general_vec_dot(
+    const void* __restrict__ input_void,
+    void* __restrict__ output_void,
+    const void* __restrict__ kernel_void,
+    const void* __restrict__ bias_void,
+    int batch,
+    int iC,
+    int oC,
+    int iT,
+    int iH,
+    int iW,
+    int oT,
+    int oH,
+    int oW,
+    int kT,
+    int kH,
+    int kW,
+    int strideT,
+    int strideH,
+    int strideW,
+    int paddingT,
+    int paddingH,
+    int paddingW,
+    int dilationT,
+    int dilationH,
+    int dilationW)
+{
+  const __fp16* input = static_cast<const __fp16*>(input_void);
+  __fp16* output = static_cast<__fp16*>(output_void);
+  const __fp16* kernel = static_cast<const __fp16*>(kernel_void);
+  const __fp16* bias = static_cast<const __fp16*>(bias_void);
+
+  const int weight_size = kT * kH * kW;
+  const int in_tile_h = (oH - 1) * strideH + (kH - 1) * dilationH + 1;
+  const int in_tile_w = (oW - 1) * strideW + (kW - 1) * dilationW + 1;
+  const int in_tile_hw = in_tile_h * in_tile_w;
+  const int input_patch_size = kT * in_tile_hw;
+
+  extern __shared__ char smem_base[];
+  __fp16* s_weight = reinterpret_cast<__fp16*>(smem_base);
+  __fp16* s_input =
+      reinterpret_cast<__fp16*>(smem_base + weight_size * sizeof(__fp16));
+
+  const int input_stride_c = iT * iH * iW;
+  const int input_stride_t = iH * iW;
+  const int output_stride_c = oT * oH * oW;
+  const int output_stride_t = oH * oW;
+
+  const int slice_idx = blockIdx.x;
+  const int b = slice_idx / (oC * oT);
+  const int rest = slice_idx % (oC * oT);
+  const int out_channel = rest / oT;
+  const int out_frame = rest % oT;
+
+  const int in_frame_start = out_frame * strideT - paddingT;
+  const int in_row_start = -paddingH;
+  const int in_col_start = -paddingW;
+
+  for (int base = threadIdx.x * 4; base < weight_size; base += blockDim.x * 4) {
+    for (int i = 0; i < 4 && (base + i) < weight_size; ++i)
+      s_weight[base + i] = kernel[out_channel * weight_size + base + i];
+  }
+  __syncthreads();
+
+  const __fp16* input_base =
+      input + b * iC * input_stride_c + out_channel * input_stride_c;
+  for (int base = threadIdx.x * 4; base < input_patch_size;
+       base += blockDim.x * 4) {
+    for (int i = 0; i < 4 && (base + i) < input_patch_size; ++i) {
+      const int idx = base + i;
+      const int kfi = idx / in_tile_hw;
+      const int hri = (idx / in_tile_w) % in_tile_h;
+      const int wci = idx % in_tile_w;
+      const int in_fi = in_frame_start + kfi * dilationT;
+      const int in_ri = in_row_start + hri;
+      const int in_ci = in_col_start + wci;
+      float val = 0.0f;
+      if (in_fi >= 0 && in_fi < iT && in_ri >= 0 && in_ri < iH && in_ci >= 0 &&
+          in_ci < iW)
+        val = (float)input_base[in_fi * input_stride_t + in_ri * iW + in_ci];
+      s_input[idx] = (__fp16)val;
+    }
+  }
+  __syncthreads();
+
+  static constexpr int KT = 3, KH = 5, KW = 5, WEIGHT_SIZE = 75;
+  float weight_reg[WEIGHT_SIZE];
+#pragma unroll
+  for (int w = 0; w < WEIGHT_SIZE; ++w) {
+    weight_reg[w] = (float)s_weight[w];
+  }
+
+  const int num_outputs = oH * oW;
+#pragma unroll 2
+  for (int out_linear = threadIdx.x; out_linear < num_outputs;
+       out_linear += blockDim.x) {
+    const int oh = out_linear / oW;
+    const int ow = out_linear % oW;
+    float sum = 0.0f;
+
+    float input_reg[WEIGHT_SIZE];
+    {
+      int wi_load = 0;
+#pragma unroll
+      for (int kf = 0; kf < KT; ++kf) {
+#pragma unroll
+        for (int kr = 0; kr < KH; ++kr) {
+#pragma unroll
+          for (int kc = 0; kc < KW; ++kc, ++wi_load) {
+            const int hr = oh * strideH + kr * dilationH;
+            const int wc = ow * strideW + kc * dilationW;
+            const int in_idx = kf * in_tile_hw + hr * in_tile_w + wc;
+            input_reg[wi_load] = (float)s_input[in_idx];
+          }
+        }
+      }
+    }
+#if defined(__HIP_DEVICE_COMPILE__) && defined(__clang__) && ( defined(__gfx950__) || defined(__gfx942__) ) && \
+    __has_builtin(__builtin_amdgcn_fdot2)
+    using f16x2_packed = short __attribute__((vector_size(4)));
+#pragma unroll
+    for (int w = 0; w + 1 < WEIGHT_SIZE; w += 2) {
+      f16x2_packed wa =
+          pack_f16x2(weight_reg[w + 0], weight_reg[w + 1]);
+      f16x2_packed xi =
+          pack_f16x2(input_reg[w + 0], input_reg[w + 1]);
+      sum = __builtin_amdgcn_fdot2(wa, xi, sum, false);
+    }
+    if (WEIGHT_SIZE&1) {
+      const int w = WEIGHT_SIZE - 1;
+      sum += static_cast<float>(weight_reg[w]) *
+             static_cast<float>(input_reg[w]);
+    }
+#else
+    for (int wi = 0; wi < WEIGHT_SIZE; ++wi) {
+      sum += static_cast<float>(weight_reg[wi]) *
+             static_cast<float>(input_reg[wi]);
+    }
+#endif
+    if (bias != nullptr)
+      sum += (float)bias[out_channel];
+    output[b * oC * output_stride_c + out_channel * output_stride_c +
+           out_frame * output_stride_t + oh * oW + ow] = (__fp16)sum;
   }
 }
 
