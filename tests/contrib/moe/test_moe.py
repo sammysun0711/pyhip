@@ -550,7 +550,7 @@ def get_fp4type_if_valid():
     return torch.float4_e2m1fn_x2 if is_arch_type('950') else None
 
 # special path for batch1 
-def entry_b1(prec=[torch.bfloat16], HIDDEN_SIZE=2048, INTER_SIZE=1024, TOPK=8, E=128, TP=8, run_count=10):
+def entry_b1(prec=[torch.bfloat16], HIDDEN_SIZE=4096, INTER_SIZE=1024, TOPK=8, E=512, TP=8, run_count=10):
     kernel_type = '16x32_2s_b1'
     perf = {}
     perf[kernel_type] = {}
@@ -562,7 +562,7 @@ def entry_b1(prec=[torch.bfloat16], HIDDEN_SIZE=2048, INTER_SIZE=1024, TOPK=8, E
         perf[kernel_type][str(weight_type)] = perf_prec
     return perf
 
-def entry_common(kernel_type, batch, prec=[torch.bfloat16], TILE_M=32, TILE_N=64, HIDDEN_SIZE=2048, INTER_SIZE=1024, TOPK=8, E=128, TP=8, run_count=10, fp8_ptpc = True):
+def entry_common(kernel_type, batch, prec=[torch.bfloat16], TILE_M=16, TILE_N=32, HIDDEN_SIZE=4096, INTER_SIZE=1024, TOPK=10, E=512, TP=8, run_count=10, fp8_ptpc = True):
     perf = {}
     perf[kernel_type] = {}
     for weight_type in prec:
@@ -597,29 +597,29 @@ def init_env():
     torch.set_default_device('cuda')
     torch.manual_seed(0)
 
-def test_acc(TILE_M=32, TILE_N=64, HIDDEN_SIZE=4096, INTER_SIZE=2048, TP=8):
+def test_acc(TILE_M=16, TILE_N=32, HIDDEN_SIZE=4096, INTER_SIZE=1024, TP=8, E=512, TOPK=10):
     init_env()
     #entry_common('aiter', batch=[8192], prec=[torch.float4_e2m1fn_x2], TILE_M=128, TILE_N=128, run_count=2, HIDDEN_SIZE=4096, INTER_SIZE=2048, TP=8)
     # entry_common('mxn_splitk_2s', batch=[16], prec=[torch.float4_e2m1fn_x2], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
 
     #entry_common('mxn_2s', batch=[8192], test_fp8=False, TILE_M=128, TILE_N=128, run_count=0)
     #assert 0,"========================"
-    batch = list(range(2, 64))
+    batch = list(range(2, 32))
     # fix TILE_M=16, TILE_N=32
-    entry_b1(run_count=0, prec=[torch.bfloat16, get_fp8type()], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP)           # batch 1
-    entry_common('16x32_2s_b', batch=batch, prec=[torch.bfloat16, get_fp8type()], TILE_M=16, TILE_N=32, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
-    batch += list(range(128, 256))
-    batch += [i * 256 for i in range(1, 4)]
-    batch += [i * 2048 for i in range(1, 5)]
-    batch += list(range(2048 * 3, 2048 * 3 + 256))
-    entry_common('mxn_splitk_2s', batch=batch, prec=[torch.bfloat16, get_fp4type_if_valid()], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
-    # TILE_M/N is configurable
-    entry_common('mxn_splitk_2s', batch=batch, prec=[get_fp8type()], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
-    entry_common('mxn_splitk_2s', batch=batch, prec=[get_fp8type()], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0, fp8_ptpc=False)
+    entry_b1(run_count=0, prec=[torch.bfloat16, get_fp8type()], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, E=E, TOPK=TOPK)
+    entry_common('16x32_2s_b', batch=batch, prec=[torch.bfloat16, get_fp8type()], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, E=E, TOPK=TOPK, run_count=0)
+    # batch += list(range(128, 256))
+    # batch += [i * 256 for i in range(1, 4)]
+    # batch += [i * 2048 for i in range(1, 5)]
+    # batch += list(range(2048 * 3, 2048 * 3 + 256))
+    # entry_common('mxn_splitk_2s', batch=batch, prec=[torch.bfloat16, get_fp4type_if_valid()], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
+    # # TILE_M/N is configurable
+    # entry_common('mxn_splitk_2s', batch=batch, prec=[get_fp8type()], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
+    # entry_common('mxn_splitk_2s', batch=batch, prec=[get_fp8type()], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0, fp8_ptpc=False)
 
-    # TODO: support fp8
-    entry_common('mxn_splitk_1s', batch=batch, prec=[torch.bfloat16], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
-    # entry_common('mxn_2s', batch=batch, prec=[torch.bfloat16], TILE_M=128, TILE_N=128, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
+    # # TODO: support fp8
+    # entry_common('mxn_splitk_1s', batch=batch, prec=[torch.bfloat16], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
+    # # entry_common('mxn_2s', batch=batch, prec=[torch.bfloat16], TILE_M=128, TILE_N=128, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, run_count=0)
 
 def show_perf(perflist):
     print('\nsummary:')
@@ -630,15 +630,16 @@ def show_perf(perflist):
                     print(f'{kernel}[{prec:<4} B={b:<4}]: {data["latency"]:5.0f} us, {data["bw"]:6.1f} GB/s, {data["flops"]:4.1f} tflops')
 
 @pytest.mark.parametrize("batch", [[1, 2, 4, 8, 12, 16, 32, 64]])
-def test_small_batch_perf(batch, HIDDEN_SIZE=4096, INTER_SIZE=2048, TP=8):
+def test_small_batch_perf(batch, HIDDEN_SIZE=4096, INTER_SIZE=1024, TP=8, E=512, TOPK=10, TILE_M=16, TILE_N=32):
     init_env()
     perf = []
     if is_arch_type('942'):
-        perf.append(entry_common('aiter', batch, prec=[torch.bfloat16, get_fp8type()], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP))
+        perf.append(entry_common('aiter', batch, prec=[torch.bfloat16, get_fp8type()], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, E=E, TOPK=TOPK))
     else:
-        perf.append(entry_common('aiter', batch, prec=[torch.bfloat16], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP))
+        perf.append(entry_common('aiter', batch, prec=[torch.bfloat16], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, E=E, TOPK=TOPK))
     # fix TILE_M=16, TILE_N=32
-    perf.append(entry_b1(prec=[torch.bfloat16, get_fp8type()], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP))           # batch 1
+    perf.append(entry_b1(prec=[torch.bfloat16, get_fp8type()], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, E=E, TOPK=TOPK))           # batch 1
+    #perf.append(entry_common(f'{TILE_M}x{TILE_N}_2s_b', batch=batch, prec=[get_fp8type()], TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, E=E, TOPK=TOPK))
     perf.append(entry_common('16x32_2s_b', batch=batch, prec=[get_fp8type()], TILE_M=16, TILE_N=32, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP))
     show_perf(perf)
 
@@ -660,11 +661,13 @@ def test_perf(batch, TILE_M=32, TILE_N=64, HIDDEN_SIZE=4096, INTER_SIZE=2048, TP
     show_perf(perf)
 
 if __name__ == '__main__':
-    TILE_M = 16
-    TILE_N = 64
     HIDDEN_SIZE = 4096
     INTER_SIZE = 1024
     TP = 8
+    E = 512
+    TOPK = 10
+    TILE_M = 16
+    TILE_N = 32
 
     init_env()
     
@@ -677,8 +680,19 @@ if __name__ == '__main__':
     #    entry_common('aiter', batch, prec=[get_fp4type_if_valid()], HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, TILE_M=TILE_M, TILE_N=TILE_N)
     if 1:
         #test_acc(TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP)
-        batch = [1, 2, 4, 8, 12, 16, 32, 64]
-        test_small_batch_perf(batch, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP)
+        batch = [1, 2, 4, 8, 10, 12, 16, 32]
+        print("============================================================================")
+        print("BATCH SIZE: ", batch)
+        print("HIDDEN_SIZE: ", HIDDEN_SIZE)
+        print("INTER_SIZE: ", INTER_SIZE)
+        print("TP: ", TP)
+        print("E: ", E)
+        print("TOPK: ", TOPK)
+        print("TILE_M: ", TILE_M)
+        print("TILE_N: ", TILE_N)
+        print("============================================================================")
+        test_acc(TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, E=E, TOPK=TOPK)
+        test_small_batch_perf(batch, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP, E=E, TOPK=TOPK, TILE_M=TILE_M, TILE_N=TILE_N)
         # batch = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
         # batch = [1, 2, 4, 8, 16, 32,64,128, 256]
         # test_perf(batch, TILE_M=TILE_M, TILE_N=TILE_N, HIDDEN_SIZE=HIDDEN_SIZE, INTER_SIZE=INTER_SIZE, TP=TP)
